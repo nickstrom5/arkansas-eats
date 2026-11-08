@@ -1,0 +1,378 @@
+{
+ "generated": "2026-11-07",
+ "domain": "https://nickstrom5.github.io/arkansas-eats",
+ "restaurants": 7279,
+ "places_incl_hidden": 7602,
+ "towns": 336,
+ "counties": 75,
+ "on_an_official_list": 5753,
+ "hand_checked_on_a_guide": 68,
+ "serves_alcohol_state_license": 1423,
+ "guide_cheesedip": 15,
+ "guide_bbq": 8,
+ "guide_catfish": 7,
+ "guide_dairybar": 28,
+ "guide_pies": 5,
+ "guide_halloffame": 18,
+ "oldest": 7,
+ "honors": 7,
+ "michelin": {},
+ "james_beard": 7,
+ "americas_classics": 2,
+ "permits_updated": "2026-10-12",
+ "city_pages": {
+  "Little Rock": {
+   "restaurants": 770,
+   "listed": 9,
+   "cheesedip": 6,
+   "bbq": 0,
+   "catfish": 0,
+   "dairybar": 0,
+   "pies": 0,
+   "halloffame": 2,
+   "hon": 1,
+   "oldest": 0
+  },
+  "Fayetteville": {
+   "restaurants": 403,
+   "listed": 4,
+   "cheesedip": 2,
+   "bbq": 1,
+   "catfish": 1,
+   "dairybar": 0,
+   "pies": 0,
+   "halloffame": 1,
+   "hon": 0,
+   "oldest": 0
+  }
+ },
+ "cities_without_a_page": {
+  "Hot Springs": 3,
+  "Fort Smith": 3,
+  "Bentonville": 2,
+  "Rogers": 3,
+  "Benton": 3,
+  "Conway": 2,
+  "Eureka Springs": 1,
+  "Springdale": 1,
+  "Jonesboro": 0,
+  "Texarkana": 0,
+  "North Little Rock": 0,
+  "Russellville": 2
+ },
+ "noindex_pages": [],
+ "web_app_data_bytes": {
+  "data/ar_shapes.json": {
+   "raw": 77326,
+   "gzip": 18079
+  },
+  "data/core.json": {
+   "raw": 586553,
+   "gzip": 127868
+  },
+  "data/detail-arkansas-county.json": {
+   "raw": 6350,
+   "gzip": 1023
+  },
+  "data/detail-ashley-county.json": {
+   "raw": 2974,
+   "gzip": 578
+  },
+  "data/detail-baxter-county.json": {
+   "raw": 14528,
+   "gzip": 2285
+  },
+  "data/detail-benton-county.json": {
+   "raw": 148094,
+   "gzip": 15591
+  },
+  "data/detail-boone-county.json": {
+   "raw": 8749,
+   "gzip": 1548
+  },
+  "data/detail-bradley-county.json": {
+   "raw": 2097,
+   "gzip": 464
+  },
+  "data/detail-calhoun-county.json": {
+   "raw": 309,
+   "gzip": 180
+  },
+  "data/detail-carroll-county.json": {
+   "raw": 16091,
+   "gzip": 2369
+  },
+  "data/detail-chicot-county.json": {
+   "raw": 2370,
+   "gzip": 724
+  },
+  "data/detail-clark-county.json": {
+   "raw": 7373,
+   "gzip": 1273
+  },
+  "data/detail-clay-county.json": {
+   "raw": 2764,
+   "gzip": 517
+  },
+  "data/detail-cleburne-county.json": {
+   "raw": 6615,
+   "gzip": 1229
+  },
+  "data/detail-cleveland-county.json": {
+   "raw": 590,
+   "gzip": 180
+  },
+  "data/detail-columbia-county.json": {
+   "raw": 5830,
+   "gzip": 1048
+  },
+  "data/detail-conway-county.json": {
+   "raw": 5137,
+   "gzip": 1045
+  },
+  "data/detail-craighead-county.json": {
+   "raw": 54805,
+   "gzip": 5876
+  },
+  "data/detail-crawford-county.json": {
+   "raw": 12487,
+   "gzip": 1970
+  },
+  "data/detail-crittenden-county.json": {
+   "raw": 12378,
+   "gzip": 2102
+  },
+  "data/detail-cross-county.json": {
+   "raw": 3493,
+   "gzip": 717
+  },
+  "data/detail-dallas-county.json": {
+   "raw": 1585,
+   "gzip": 437
+  },
+  "data/detail-desha-county.json": {
+   "raw": 2679,
+   "gzip": 733
+  },
+  "data/detail-drew-county.json": {
+   "raw": 4275,
+   "gzip": 885
+  },
+  "data/detail-faulkner-county.json": {
+   "raw": 55470,
+   "gzip": 6045
+  },
+  "data/detail-franklin-county.json": {
+   "raw": 4786,
+   "gzip": 924
+  },
+  "data/detail-fulton-county.json": {
+   "raw": 1247,
+   "gzip": 388
+  },
+  "data/detail-garland-county.json": {
+   "raw": 57224,
+   "gzip": 6232
+  },
+  "data/detail-grant-county.json": {
+   "raw": 3148,
+   "gzip": 654
+  },
+  "data/detail-greene-county.json": {
+   "raw": 11581,
+   "gzip": 1938
+  },
+  "data/detail-hempstead-county.json": {
+   "raw": 5326,
+   "gzip": 931
+  },
+  "data/detail-hot-spring-county.json": {
+   "raw": 4690,
+   "gzip": 999
+  },
+  "data/detail-howard-county.json": {
+   "raw": 2646,
+   "gzip": 550
+  },
+  "data/detail-independence-county.json": {
+   "raw": 9660,
+   "gzip": 1463
+  },
+  "data/detail-izard-county.json": {
+   "raw": 1707,
+   "gzip": 465
+  },
+  "data/detail-jackson-county.json": {
+   "raw": 2978,
+   "gzip": 626
+  },
+  "data/detail-jefferson-county.json": {
+   "raw": 15757,
+   "gzip": 2437
+  },
+  "data/detail-johnson-county.json": {
+   "raw": 6075,
+   "gzip": 1071
+  },
+  "data/detail-lafayette-county.json": {
+   "raw": 706,
+   "gzip": 235
+  },
+  "data/detail-lawrence-county.json": {
+   "raw": 2422,
+   "gzip": 622
+  },
+  "data/detail-lee-county.json": {
+   "raw": 1550,
+   "gzip": 516
+  },
+  "data/detail-lincoln-county.json": {
+   "raw": 1303,
+   "gzip": 417
+  },
+  "data/detail-little-river-county.json": {
+   "raw": 3365,
+   "gzip": 679
+  },
+  "data/detail-logan-county.json": {
+   "raw": 4296,
+   "gzip": 826
+  },
+  "data/detail-lonoke-county.json": {
+   "raw": 15963,
+   "gzip": 2628
+  },
+  "data/detail-madison-county.json": {
+   "raw": 2845,
+   "gzip": 582
+  },
+  "data/detail-marion-county.json": {
+   "raw": 3099,
+   "gzip": 663
+  },
+  "data/detail-miller-county.json": {
+   "raw": 10503,
+   "gzip": 1715
+  },
+  "data/detail-mississippi-county.json": {
+   "raw": 10771,
+   "gzip": 1780
+  },
+  "data/detail-monroe-county.json": {
+   "raw": 2279,
+   "gzip": 574
+  },
+  "data/detail-montgomery-county.json": {
+   "raw": 1311,
+   "gzip": 363
+  },
+  "data/detail-nevada-county.json": {
+   "raw": 1005,
+   "gzip": 349
+  },
+  "data/detail-newton-county.json": {
+   "raw": 1002,
+   "gzip": 394
+  },
+  "data/detail-ouachita-county.json": {
+   "raw": 5195,
+   "gzip": 993
+  },
+  "data/detail-perry-county.json": {
+   "raw": 831,
+   "gzip": 288
+  },
+  "data/detail-phillips-county.json": {
+   "raw": 3148,
+   "gzip": 698
+  },
+  "data/detail-pike-county.json": {
+   "raw": 2833,
+   "gzip": 552
+  },
+  "data/detail-poinsett-county.json": {
+   "raw": 4680,
+   "gzip": 970
+  },
+  "data/detail-polk-county.json": {
+   "raw": 4438,
+   "gzip": 907
+  },
+  "data/detail-pope-county.json": {
+   "raw": 17914,
+   "gzip": 2857
+  },
+  "data/detail-prairie-county.json": {
+   "raw": 2101,
+   "gzip": 556
+  },
+  "data/detail-pulaski-county.json": {
+   "raw": 197546,
+   "gzip": 21778
+  },
+  "data/detail-randolph-county.json": {
+   "raw": 3478,
+   "gzip": 670
+  },
+  "data/detail-saline-county.json": {
+   "raw": 25079,
+   "gzip": 3967
+  },
+  "data/detail-scott-county.json": {
+   "raw": 3025,
+   "gzip": 571
+  },
+  "data/detail-searcy-county.json": {
+   "raw": 2133,
+   "gzip": 561
+  },
+  "data/detail-sebastian-county.json": {
+   "raw": 67433,
+   "gzip": 6899
+  },
+  "data/detail-sevier-county.json": {
+   "raw": 4646,
+   "gzip": 814
+  },
+  "data/detail-sharp-county.json": {
+   "raw": 4093,
+   "gzip": 795
+  },
+  "data/detail-st-francis-county.json": {
+   "raw": 5986,
+   "gzip": 1112
+  },
+  "data/detail-stone-county.json": {
+   "raw": 3436,
+   "gzip": 644
+  },
+  "data/detail-union-county.json": {
+   "raw": 11473,
+   "gzip": 1914
+  },
+  "data/detail-van-buren-county.json": {
+   "raw": 3658,
+   "gzip": 755
+  },
+  "data/detail-washington-county.json": {
+   "raw": 144353,
+   "gzip": 14087
+  },
+  "data/detail-white-county.json": {
+   "raw": 20979,
+   "gzip": 3173
+  },
+  "data/detail-woodruff-county.json": {
+   "raw": 1240,
+   "gzip": 394
+  },
+  "data/detail-yell-county.json": {
+   "raw": 3799,
+   "gzip": 717
+  },
+  "data/ids.json": {
+   "raw": 94655,
+   "gzip": 55145
+  }
+ }
+}

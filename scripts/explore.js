@@ -1,0 +1,759 @@
+// Arkansas Eats web app: the iPhone app's guides, search, filters, map and place details, in the browser.
+// Keep its guide rules in step with ArkansasEats/Models/Guide.swift and its search with ArkansasEats/Models/Search.swift.
+// Same data as the app, split by scripts/make-site.py into data/core.json (list, search and map columns), data/ids.json (each place's
+// stable id, fetched at the first tap, key, scroll or hover, so a visit that only looks doesn't download it; saved places and #p= links
+// wait for it) and data/detail-<county>.json (phones, websites, notes, and county records or inspection results where a state has them), fetched per
+// county when a place there is opened. Every data file carries the version of the core.json it was built with (core.json "ver",
+// detail "_v", ids "v"): files from another build are fetched again, and never mixed in, because ids and details are keyed by row. No cookies, no trackers; saved places and the last guide live in this browser's localStorage only
+// (keys start with areats-: other state sites share the nickstrom5.github.io origin).
+// The page runs under a strict Content-Security-Policy (hash-pinned inline script and style): never add inline event handlers or
+// inline style attributes to the HTML built here; set properties from code instead.
+(() => {
+  "use strict";
+  const BASE = document.documentElement.dataset.base || "";
+  const $ = (s) => document.querySelector(s);
+  // every value that goes into innerHTML passes through esc(), numbers included (the data file is trusted, but not that much)
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const own = (o, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);   // Object.hasOwn, for older Safari too
+  const PREFIX = "areats-";
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(PREFIX + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(PREFIX + k, JSON.stringify(v)); } catch { /* private mode */ } },
+  };
+  // only http(s) links leave the page; bare hosts ("example.com/menu") get https://
+  const safeUrl = (u) => {
+    u = String(u ?? "").trim();
+    if (/^https?:\/\/[^\s"'<>\\]+$/i.test(u)) return u;
+    if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(?:[/?#][^\s"'<>\\]*)?$/i.test(u)) return "https://" + u;
+    return null;
+  };
+  const num = (x) => (x == null || x === "" || !Number.isFinite(Number(x)) ? null : Number(x));
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const fmtDate = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s ?? "")); return m ? `${MONTHS[+m[2] - 1]} ${+m[3]}, ${m[1]}` : String(s ?? ""); };
+  // the Arkansas Department of Health's inspection search (reports by search only, no score or grade): linked from each place
+  const DPH_URL = "https://foodserviceprod.adh.arkansas.gov/Web/inspection/publicinspectionsearch.aspx";
+  const SCORE_LIST = {};
+
+  // ---------------------------------------------------------------- search (a port of ArkansasEats/Models/Search.swift)
+  // pikes are street types too, and "state st" is a street, not the state
+  const typeSyn = { avenue: "ave", av: "ave", street: "st", boulevard: "blvd", road: "rd", drive: "dr", place: "pl", court: "ct",
+    parkway: "pkwy", highway: "hwy", lane: "ln", trail: "trl", circle: "cir", terrace: "ter", pike: "pike", pk: "pike", pke: "pike" };
+  // directions and road names: "north main" finds "N Main St", "interstate 40" finds "I-40"
+  const syn = { ...typeSyn, north: "n", south: "s", east: "e", west: "w", northwest: "nw", northeast: "ne", southwest: "sw", southeast: "se",
+    saint: "st", mount: "mt", fort: "ft", interstate: "i", ih: "i", freeway: "fwy", expressway: "expy" };
+  const abbrs = new Set(Object.values(syn)), typeAbbrs = new Set(Object.values(typeSyn));
+  const DIRS = new Set(["n", "s", "e", "w", "ne", "nw", "se", "sw"]);
+  // the bit order is pipeline/arkansas.py's TAGS
+  const CHEESEDIP = 1, BBQ = 2, CATFISH = 4, PIES = 8, DAIRYBAR = 16, HALLOFFAME = 32, OLDEST = 64;
+  // a dish ("gumbo", "pig ear sandwich") is not a tag: it's in each hand-checked place's search text, so it finds the places serving it
+  const tagPhrases = [["cheese dip", CHEESEDIP], ["queso", CHEESEDIP], ["barbecue", BBQ], ["bbq", BBQ], ["bar b q", BBQ], ["ribs", BBQ],
+    ["catfish houses", CATFISH], ["catfish house", CATFISH], ["catfish", CATFISH], ["dairy bars", DAIRYBAR], ["dairy bar", DAIRYBAR],
+    ["drive ins", DAIRYBAR], ["drive in", DAIRYBAR], ["pies", PIES], ["pie", PIES], ["hall of fame", HALLOFFAME]];
+  // letters with no accent to strip (NFD keeps them): "pho tay do" must find Phở Tây Đô (Ohio's 2026-10-24 fix)
+  const UNACCENTED = { "ø": "o", "æ": "ae", "œ": "oe", "đ": "d", "ł": "l", "ß": "ss", "þ": "th", "ı": "i" };
+  function normalize(s) {
+    let t = String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[øæœđłßþı]/g, (c) => UNACCENTED[c]);
+    // initials keep together, so "jr crickets" finds J.R. Crickets (St. and E. Main St stay as they are)
+    t = t.replace(/\b([a-z])\.(?=[a-z]\b)/g, "$1");
+    t = t.replace(/\b([a-z0-9])\s*&\s*([a-z0-9])\b/g, "$1$2").replace(/&/g, " and ").replace(/['’`]/g, "");
+    return t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  }
+  const normAddr = (s) => normalize(s).split(" ").map((w) => (own(syn, w) ? syn[w] : w)).join(" ");
+
+  function parse(text) {
+    const q = { tokens: [], town: null, townPhrase: null, tag: 0, tagPhrase: null, tagStem: null, townNeedle: null, streetNeedle: null };
+    let raw = normalize(text).split(" ").filter(Boolean);
+    if (!raw.length) return q;
+    let mapped = raw.map((w) => (own(syn, w) ? syn[w] : w));
+    const find = (phrase) => {
+      const p = phrase.split(" ");
+      for (let i = 0; i + p.length <= mapped.length; i++) if (p.every((w, k) => mapped[i + k] === w)) return [i, i + p.length];
+      return null;
+    };
+    const cut = ([a, b]) => { const words = raw.slice(a, b).join(" "); raw.splice(a, b - a); mapped.splice(a, b - a); return words; };
+    for (const [phrase, tag] of tagPhrases) { const r = find(normalize(phrase)); if (r) { q.tag = tag; q.tagPhrase = cut(r); break; } }
+    if (q.tagPhrase) { const stem = normalize(q.tagPhrase).replace(/s$/, ""); q.tagStem = stem ? " " + stem : null; }
+    // the longest town named in the query wins, unless a street type follows it ("houston st" is a street)
+    for (const key of TOWN_KEYS_BY_LENGTH) {
+      const r = find(key);
+      if (r && !(r[1] < mapped.length && typeAbbrs.has(mapped[r[1]]))) {
+        // a direction word right before the town ("north shreveport") may mean the street as well as the town
+        if (r[0] > 0 && DIRS.has(mapped[r[0] - 1])) q.streetNeedle = " " + mapped.slice(r[0] - 1, r[1]).join(" ") + " ";
+        q.town = TOWN_KEYS[key]; q.townPhrase = cut(r); q.townNeedle = " " + normalize(q.townPhrase); break;
+      }
+    }
+    const stop = new Set(["the", "and", "of", "a", "in", "near", "me"]);   // "barbecue near me" isn't a place named "Me"
+    let idx = raw.map((_, i) => i);
+    // stop words stay only when they're all there is ("the"); next to a guide or a town ("lemon pepper near me") they go
+    if (q.tag || q.town || idx.some((i) => !stop.has(mapped[i]))) idx = idx.filter((i) => !stop.has(mapped[i]));
+    idx.forEach((i, n) => {
+      const token = raw[i], isLast = n === idx.length - 1;
+      if (own(syn, token)) { q.tokens.push([` ${syn[token]} `, ` ${token}`]); return; }
+      const whole = (abbrs.has(token) && (!isLast || token.length > 1)) || (token.length <= 2 && !isLast);
+      const needles = [" " + token + (whole ? " " : "")];
+      if (isLast && token.length >= 3) for (const [word, abbr] of Object.entries(typeSyn)) if (word !== token && word.startsWith(token)) needles.push(` ${abbr} `);
+      q.tokens.push(needles);
+    });
+    // "brady st": a finished street type sticks to the word before it
+    if (q.tokens.length >= 2 && idx.length && typeAbbrs.has(mapped[idx[idx.length - 1]])) {
+      const last = idx[idx.length - 1], prev = idx[idx.length - 2];
+      q.tokens.splice(-2, 2, [` ${mapped[prev]} ${mapped[last]} `, ` ${raw[prev]} ${raw[last]}`]);
+    }
+    return q;
+  }
+  const qEmpty = (q) => !q.tokens.length && !q.town && !q.tag;
+  function matches(p, q) {
+    if (q.tag && !(p.g & q.tag)) { if (!q.tagStem || !p.nameText.includes(q.tagStem)) return false; }
+    if (q.town && p.c !== q.town) {
+      if (!(q.townNeedle && p.nameText.includes(q.townNeedle)) && !(q.streetNeedle && p.search.includes(q.streetNeedle))) return false;
+    }
+    return q.tokens.every((needles) => needles.some((n) => p.search.includes(n)));
+  }
+  const nameMatches = (p, q) => q.tokens.length && q.tokens.every((needles) => needles.some((n) => p.nameText.includes(n)));
+
+  // ---------------------------------------------------------------- guides (ArkansasEats/Models/Guide.swift)
+  const hcTag = (t) => (p) => p.hc && Boolean(p.g & t);
+  const HC_SORTS = ["featured", "nearest", "name"];
+  const GUIDES = {
+    cheesedip: { title: "Cheese Dip Trail", sub: "Hand-checked stops on the state's Cheese Dip Trail, the dip Arkansas claims", inc: hcTag(CHEESEDIP), sorts: HC_SORTS },
+    bbq: { title: "Barbecue", sub: "Hand-checked barbecue, from Jones in Marianna to McClard's in Hot Springs", inc: hcTag(BBQ), sorts: HC_SORTS },
+    catfish: { title: "Catfish Houses", sub: "Hand-checked catfish houses, from Des Arc to El Dorado", inc: hcTag(CATFISH), sorts: HC_SORTS },
+    dairybar: { title: "Dairy Bars & Drive-Ins", sub: "Hand-checked dairy bars and drive-ins: burgers, shakes and cones", inc: hcTag(DAIRYBAR), sorts: HC_SORTS },
+    pies: { title: "Homemade Pie", sub: "Hand-checked cafés known for their homemade pie", inc: hcTag(PIES), sorts: HC_SORTS },
+    halloffame: { title: "Food Hall of Fame", sub: "Arkansas Food Hall of Fame inductees, hand-checked as open", inc: hcTag(HALLOFFAME), sorts: HC_SORTS },
+    honors: { title: "James Beard Honors", sub: "James Beard Foundation honorees", inc: (p) => p.mi > 0 || p.jb, sorts: ["iconic", "nearest"] },
+    scores: { title: "ADH Inspections", sub: "The Arkansas Department of Health's latest inspection, as it lists it", inc: (p) => p.sd != null, sorts: ["recent", "nearest", "name"] },
+    oldest: { title: "Oldest Places", sub: "Founding years from a 2026 source, oldest first", inc: (p) => p.f != null && p.hc && Boolean(p.g & OLDEST), sorts: ["oldest"], ranked: true },
+    all: { title: "All Restaurants", sub: "Restaurants, cafés, bars and bakeries statewide", inc: () => true, sorts: ["name", "nearest"] },
+    saved: { title: "Saved", sub: "Places you saved in this browser", inc: (p) => saved.has(p.id), sorts: ["name", "nearest"] },
+  };
+  const HC_GUIDES = ["cheesedip", "bbq", "catfish", "dairybar", "pies", "halloffame"];
+  const SORT_LABEL = { featured: "Featured first", nearest: "Nearest", oldest: "Oldest first", name: "A to Z", iconic: "Honor, then name",
+    recent: "Latest inspection first" };
+  const MI = ["", "MICHELIN Recommended", "Bib Gourmand", "1 MICHELIN Star", "2 MICHELIN Stars", "3 MICHELIN Stars"];
+  const CHIP = [[CHEESEDIP, "Cheese dip"], [BBQ, "Barbecue"], [CATFISH, "Catfish house"], [DAIRYBAR, "Dairy bar"], [PIES, "Homemade pie"],
+    [HALLOFFAME, "Food Hall of Fame"]];
+
+  // ---------------------------------------------------------------- state
+  let P = [], CAL = {}, TOWN_KEYS = {}, TOWN_KEYS_BY_LENGTH = [], GENERATED = "", META = {};
+  let here = null, shown = 100, current = [], view = "list";
+  const savedRaw = store.get("saved", []);
+  const saved = new Set(Array.isArray(savedRaw) ? savedRaw.filter((x) => typeof x === "string" && x.length < 64) : []);
+  const st = { g: "cheesedip", q: "", sort: "", town: "", cuisine: "", chains: false, bib: false, p: "" };
+  let bibCount = 0;   // Bib Gourmand places (non-restaurants left out): the box shows only when there are some
+
+  const miles = (a, b) => {
+    const r = Math.PI / 180, dLa = (b.la - a.la) * r, dLo = (b.lo - a.lo) * r;
+    const h = Math.sin(dLa / 2) ** 2 + Math.cos(a.la * r) * Math.cos(b.la * r) * Math.sin(dLo / 2) ** 2;
+    return 3958.8 * 2 * Math.asin(Math.sqrt(h));
+  };
+  const milesText = (m) => (m < 10 ? m.toFixed(1) : Math.round(m)) + " mi";
+
+  function order() {
+    const g = GUIDES[st.g];
+    let o = st.sort && g.sorts.includes(st.sort) ? st.sort : HC_GUIDES.includes(st.g) && here ? "nearest" : g.sorts[0];
+    if (o === "nearest" && !here) o = g.sorts.find((s) => s !== "nearest") || o;   // no location yet: say what the list is really sorted by
+    return o;
+  }
+
+  function allows(p) {
+    if (st.town && p.c !== st.town) return false;
+    if (st.cuisine && p.cu !== st.cuisine) return false;
+    if (st.chains && p.ch >= 5) return false;
+    if (st.bib && p.mi !== 2) return false;      // MICHELIN Bib Gourmand only, as the app's Filters switch
+    return true;
+  }
+
+  function list() {
+    const g = GUIDES[st.g], q = parse(st.q), o = order();
+    if (qEmpty(q) && st.q.trim()) return [];   // typed something, but nothing searchable ("🍕", "!!!")
+    let out = P.filter((p) => g.inc(p) && allows(p) && (qEmpty(q) || matches(p, q)));
+    const byName = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i);
+    if (o === "nearest" && here) {
+      const dist = new Map(out.map((p) => [p, p.la != null ? miles(here, p) : Infinity]));
+      out.sort((a, b) => dist.get(a) - dist.get(b) || byName(a, b));
+    }
+    else if (o === "featured") out.sort((a, b) => (b.ip ?? -1) - (a.ip ?? -1) || (a.f ?? 9999) - (b.f ?? 9999) || byName(a, b));
+    else if (o === "oldest") out.sort((a, b) => (a.f ?? 9999) - (b.f ?? 9999) || byName(a, b));
+    else if (o === "recent") out.sort((a, b) => (b.sd ?? -1) - (a.sd ?? -1) || byName(a, b));   // the inspection date; the score never orders a list
+    else if (o === "iconic") {   // MICHELIN distinction, then the James Beard honor, then name (the app's order)
+      const jb = (p) => (p.h & 1 ? 4 : p.h & 2 ? 3 : p.h & 4 ? 2 : p.h & 8 ? 1 : 0);
+      out.sort((a, b) => (b.mi || 0) - (a.mi || 0) || jb(b) - jb(a) || byName(a, b));
+    }
+    else out.sort(byName);
+    if (q.tokens.length && !g.ranked) {       // name matches first when searching
+      const named = out.filter((p) => nameMatches(p, q));
+      if (named.length && named.length < out.length) { const ids = new Set(named); out = named.concat(out.filter((p) => !ids.has(p))); }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- rendering
+  const jbLabel = (p) => (p.h & 1 ? "America's Classic" : p.h & 2 ? "James Beard winner" : p.h & 4 ? "James Beard finalist" : p.h & 8 ? "James Beard semifinalist" : p.jb ? "James Beard (restaurateur)" : null);
+  function chips(p, max) {
+    const c = [];
+    if (p.mi && MI[p.mi]) c.push(`<span class="tag tag-mi">${esc(MI[p.mi])}</span>`);
+    const jb = jbLabel(p);
+    if (jb) c.push(`<span class="tag tag-jb">${esc(jb)}</span>`);
+    if (p.hc) for (const [t, label] of CHIP) if (p.g & t) c.push(`<span class="tag">${label}</span>`);
+    if (p.hc && p.g & OLDEST && p.f) c.push(`<span class="tag tag-plain">Since ${esc(p.f)}</span>`);
+    if (p.ch >= 5) c.push(`<span class="tag tag-plain">Chain · ${esc(p.ch)}</span>`);
+    if (p.t === 0 && !p.h && !p.mi && !p.hc) c.push('<span class="tag tag-dash">Listing only</span>');
+    return (max ? c.slice(0, max) : c).join("");
+  }
+
+  function metric(p, o) {
+    if (o === "nearest" && here && p.la != null) return [milesText(miles(here, p)), "away"];
+    if (p.f && st.g !== "all") return [String(p.f), "since"];
+    return null;
+  }
+
+  function render() {
+    const g = GUIDES[st.g], o = order();
+    if (st.g === "saved" && !idsReady) loadIds().then(() => { if (st.g === "saved") render(); });
+    current = list();
+    document.querySelectorAll(".ex-guides button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === st.g)));
+    $("#ex-sub").textContent = g.sub;
+    const sortSel = $("#ex-sort");
+    sortSel.innerHTML = g.sorts.map((s) => `<option value="${esc(s)}"${s === o ? " selected" : ""}>${esc(SORT_LABEL[s])}</option>`).join("");
+    sortSel.disabled = g.sorts.length < 2;
+    const filters = [st.town && `in ${st.town}`, st.cuisine && st.cuisine, st.chains && "no chains", st.bib && "Bib Gourmand"].filter(Boolean);
+    $("#ex-count").textContent = `${current.length.toLocaleString()} ${current.length === 1 ? "place" : "places"} · ${SORT_LABEL[o]}` + (filters.length ? ` · ${filters.join(", ")}` : "");
+    $("#ex-clear").hidden = !filters.length;
+    // Near me stays: each tap asks for a fresh fix (people move), and it's how to retry after a timeout
+    if (view === "list") renderList(o); else drawMap();
+    saveHash();
+  }
+
+  // typing searches only the open guide (the page opens on Lemon Pepper Wings): when that finds little, the same words across every
+  // restaurant, with the same filters, so a famous place outside the guide isn't a dead end
+  const FEW = 5;
+  function elsewhereCount() {
+    const q = parse(st.q);
+    if (st.g === "all" || qEmpty(q) || current.length >= FEW) return 0;
+    let n = 0;
+    for (const p of P) if (allows(p) && matches(p, q)) n++;
+    return n > current.length ? n : 0;
+  }
+  const allButton = (n) => `<button type="button" class="ex-small" id="ex-all">Search all restaurants (${esc(n.toLocaleString())} ${n === 1 ? "match" : "matches"})</button>`;
+  function wireAll() {
+    const b = $("#ex-all");
+    if (b) b.onclick = () => { st.g = "all"; st.sort = ""; shown = 100; render(); const r = $(".ex-row"); if (r) r.focus(); };
+  }
+
+  function renderList(o) {
+    const ol = $("#ex-list");
+    const g = GUIDES[st.g];
+    const elsewhere = elsewhereCount();
+    if (!current.length) {
+      ol.innerHTML = `<li class="ex-empty">${st.g === "saved" && !idsReady ? "Loading your saved places…" : st.g === "saved" && idsFailed && saved.size ? "Your saved places couldn't load: you may be offline, or the site was just updated. Reload the page to try again." : elsewhere ? `Nothing in ${esc(g.title)} matches that. ${allButton(elsewhere)}` : st.g === "saved" ? "Nothing saved yet. Open a place and tap Save to keep it here, in this browser." : "No places match. Try fewer words or clear the filters."}</li>`;
+      wireAll();
+      $("#ex-more").hidden = true;
+      return;
+    }
+    ol.innerHTML = current.slice(0, shown).map((p, i) => {
+      const m = metric(p, o);
+      const rank = g.ranked ? `<span class="ex-rank${i < 3 ? " top" : ""}" aria-label="Rank ${i + 1}">${i + 1}</span>` : "";
+      const where = [p.c, p.cu].filter(Boolean).join(" · ");
+      const big = m ? `<b>${esc(m[0])}</b>` : "";
+      return `<li><button class="ex-row" data-i="${esc(p.i)}">${rank}<span class="ex-main"><b>${esc(p.n)}</b><span class="ex-town">${esc(where)}</span><span class="ex-chips">${chips(p, 4)}</span></span>${m ? `<span class="ex-metric">${big}<small>${esc(m[1])}</small></span>` : ""}</button></li>`;
+    }).join("") + (elsewhere ? `<li class="ex-empty">Only ${esc(current.length)} in ${esc(g.title)}. ${allButton(elsewhere)}</li>` : "");
+    wireAll();
+    const left = current.length - shown;
+    $("#ex-more").hidden = left <= 0;
+    $("#ex-more").textContent = `Show more (${left.toLocaleString()} left)`;
+  }
+
+  // ---------------------------------------------------------------- place panel
+  const TIER = { 2: "On an official list", 1: "High-confidence listing", 0: "Listing only" };   // "High-confidence", not "confirmed" (Nick, 2026-10-13)
+
+  // the state's alcohol licenses are the only statewide official list, and only places serving alcohol hold one, so its match rates are a
+  // floor for comparing kinds of listings, not a rate to quote per place (the app shows none either)
+  function howWeKnow(p) {
+    const src = SOURCES[p.s] || "meta";
+    if (src === "research") return "On our hand-checked list (checked against a 2025 or 2026 source). The open map data didn't list it as a place to eat, so it's placed from its own map listing or street address.";
+    if (p.t === 2) return src === "official"
+      ? "From the state's alcohol license list. The open map data didn't have it, so it's placed on its licensed street address."
+      : "Matched to an active state alcohol license.";
+    return (p.t === 1 ? "A high-confidence listing in Overture's open map data." : "A single listing in Overture's open map data, so it may be closed or misfiled.")
+      + (p.hc ? " It's also on our hand-checked list, checked against a 2025 or 2026 source." : "");
+  }
+
+  const kv = (k, v) => (v == null || v === "" ? "" : `<div class="ex-kv"><span>${esc(k)}</span><b>${esc(v)}</b></div>`);
+  const section = (t, body) => `<section class="ex-sec"><h3>${esc(t)}</h3>${body}</section>`;
+  let listAtPush = null;   // the list's URL state when a place was opened with pushState (Back then closes the panel)
+
+  // the open place is a modal dialog at every width (a bottom sheet on phones, a side sheet on wider screens, which would otherwise
+  // cover Near me and the List/Map buttons): everything behind it is inert, and a click on the dimmed backdrop closes it
+  function panelMode() {
+    const panel = $("#ex-panel"), modal = !panel.hidden;
+    if (modal) { panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); }
+    else { panel.removeAttribute("role"); panel.removeAttribute("aria-modal"); }
+    $("#ex-backdrop").hidden = !modal;
+    const behind = [...document.querySelectorAll("body > .skip, .wrap > header, .wrap > nav, .wrap > footer, #main > *")].filter((el) => el !== panel && el.id !== "ex-backdrop");
+    behind.forEach((el) => { el.inert = modal; });
+  }
+
+  // ADH lists each inspection's observations and gives no score or grade: the latest is shown as ADH lists it, dated, labeled ADH's,
+  // with ADH's own note; never a grade of ours, and no list is ordered by it
+  const inspectionSection = (d, p) => {
+    const ins = Array.isArray(d.ins) && d.ins.length >= 3 ? d.ins : null;
+    const note = `<p class="ex-fine">The number of observations on the Arkansas Department of Health's own report. ADH gives no score or grade, and this site computes none; problems are often corrected during the inspection. ADH: "Remember this inspection is only a snapshot in time. It represents only what the inspector saw on the particular date of inspection."</p>`;
+    const link = `<p><a href="${DPH_URL}" rel="noopener" target="_blank">Search ADH's inspection reports</a></p>`;
+    if (ins) return section("Health inspections", kv("Latest inspection (ADH)", `${fmtDate(ins[1])} · ${ins[0]}`) + note + link);
+    return section("Health inspections", `<p class="ex-fine">The Arkansas Department of Health inspects every food establishment in the state. This place isn't matched to an inspection in its search results, so none is shown.</p>` + link);
+  };
+
+  function openPlace(p, push = true) {
+    const panel = $("#ex-panel");
+    const wasOpen = !panel.hidden;
+    // the place opens at once; its id (for Save, the #p= link and the Back step) follows when ids.json arrives, which the first tap
+    // only starts, so a tap never waits on it. If ids.json can't load (offline, or a build changed under us), the place stays open
+    // without Save and without a link.
+    const waiting = p.id == null && !idsReady;
+    if (waiting && (push || !wasOpen)) loadIds().then(() => { if (!panel.hidden && panel.dataset.i === String(p.i)) openPlace(p, push); });
+    const noId = p.id == null, pid = p.id ?? "";
+    // a re-render (the county's details just arrived) replaces the panel's buttons: remember where keyboard focus was, to put it back
+    const focused = wasOpen && panel.contains(document.activeElement) ? document.activeElement : null;
+    const refocus = focused && (focused.id ? `#${focused.id}` : focused.textContent.trim());
+    st.p = pid;
+    const loaded = DETAIL_LOADED.has(p.co), failed = DETAIL_FAILED.has(p.co);
+    const d = DETAIL.get(p.i) || {};
+    const la = num(p.la), lo = num(p.lo);
+    const addr = [p.a, [p.c, p.z].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+    const apple = la != null && lo != null
+      ? `https://maps.apple.com/?q=${encodeURIComponent(p.n)}&ll=${la},${lo}`
+      : `https://maps.apple.com/?q=${encodeURIComponent(p.n + ", " + addr)}`;
+    const dirs = la != null && lo != null ? `https://maps.apple.com/?daddr=${la},${lo}&dirflg=d` : apple;
+    const site = safeUrl(d.w);
+    const tel = d.ph ? String(d.ph).replace(/[^\d+]/g, "") : "";
+    let html = `<button class="ex-close" id="ex-close" aria-label="Close">×</button>
+      <p class="ex-kicker">${esc([p.c || "Arkansas", p.county && p.county !== "Arkansas" ? p.county : ""].filter(Boolean).join(" · ").toUpperCase())}</p>
+      <h2 id="ex-pname">${esc(p.n)}</h2>
+      <p class="ex-addr">${esc([addr, p.cu].filter(Boolean).join(" · "))}</p>
+      ${here && la != null ? `<p class="ex-dist">${esc(milesText(miles(here, p)))} away</p>` : ""}
+      <p class="ex-chips">${chips(p)}</p>
+      <div class="ex-actions">
+        <a class="btn ex-apple" href="${esc(apple)}" rel="noopener" target="_blank">Ratings, hours &amp; photos · Apple Maps</a>
+        <div class="ex-act-row">
+          <a href="${esc(dirs)}" rel="noopener" target="_blank">Directions</a>
+          ${tel ? `<a href="tel:${esc(tel)}">Call</a>` : ""}
+          ${site ? `<a href="${esc(site)}" rel="noopener nofollow" target="_blank">Website</a>` : ""}
+          ${waiting ? '<button id="ex-save" aria-pressed="false" disabled>Save</button>' : noId ? "" : `<button id="ex-save" aria-pressed="${saved.has(pid)}">${saved.has(pid) ? "Saved" : "Save"}</button>`}
+        </div>
+      </div>`;
+    if (!loaded) html += `<p class="ex-fine">Loading details…</p>`;
+    if (p.hc && (d.note || p.dish || p.f || d.seas)) {
+      html += section("Hand-checked", (d.note ? `<p>${esc(d.note)}</p>` : "") + kv("On the menu", p.dish ? String(p.dish).split("; ").join(", ") : "")
+        + kv("Open here since", p.f) + (d.fn ? `<p class="ex-fine">${esc(d.fn)}</p>` : "") + kv("Season", d.seas)
+        + `<p class="ex-fine">Checked against a 2025 or 2026 source: Visit Arkansas's own pages, the MICHELIN Guide, or a dated local story. Menus and hours change, so check before you go.</p>`);
+    }
+    if (p.mi || d.jbf) {
+      const lines = [...(p.mi && MI[p.mi] ? [MI[p.mi]] : []),
+        ...(d.jbf ? String(d.jbf).split("; ").map((x) => "James Beard: " + x) : [])];
+      html += section("Honors", `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><p class="ex-fine">Honors are facts, not ratings. MICHELIN is a trademark of Michelin. James Beard Foundation and James Beard Award are trademarks of the James Beard Foundation.</p>`);
+    }
+    if (failed) html += `<p class="ex-fine">This place's details (county records, phone, website) didn't load: you may be offline, or the site was just updated. Reload the page to try again.</p>`;
+    else if (loaded) {
+      const lic = Array.isArray(d.lic) ? d.lic.filter(Array.isArray) : [];
+      html += section("Official records", (lic.length ? lic.map((l) => kv(String(l[0] || "Record"), [l[2], l[1] ? "No. " + l[1] : ""].filter(Boolean).join(" · ") || "On the list")).join("")
+          : kv("License record", "—"))
+        + kv("Serves alcohol", p.lq ? "Licensed to serve on the premises" : "—")
+        + `<p class="ex-fine">Alcohol permits are from DFA Alcoholic Beverage Control's monthly permit list. A place without a matched on-premises permit shows —: unknown, never "no". Many counties are dry; restaurants there may serve under a private club permit.</p>`);
+    }
+    html += loaded ? inspectionSection(d, p) : "";
+    html += section("How we know it's here", kv("Listed as", TIER[p.t])
+      + (p.ch >= 2 ? kv("Locations in Arkansas", p.ch.toLocaleString()) : "") + `<p class="ex-fine">${esc(howWeKnow(p))}</p>`);
+    const store_url = safeUrl(window.APP_STORE_URL);   // set in the page footer script once the App Store listing exists
+    html += store_url
+      ? `<p class="ex-app">Save it on your phone: <a href="${esc(store_url)}" rel="noopener">get the free iPhone app</a></p>`
+      : `<p class="ex-app">The iPhone app is coming soon. <a href="${BASE}/#download">Ask for early access</a></p>`;
+    panel.innerHTML = html;
+    panel.dataset.id = pid;
+    panel.dataset.i = String(p.i);
+    panel.hidden = false;
+    document.body.classList.add("ex-open");
+    panelMode();
+    $("#ex-close").onclick = () => closePlace();
+    if (!noId) $("#ex-save").onclick = (e) => {
+      if (saved.has(p.id)) saved.delete(p.id); else saved.add(p.id);
+      store.set("saved", [...saved]);
+      e.target.textContent = saved.has(p.id) ? "Saved" : "Save";
+      e.target.setAttribute("aria-pressed", String(saved.has(p.id)));
+      if (st.g === "saved") render();
+    };
+    const samePlace = wasOpen && panel.dataset.shown === String(p.i);   // a re-render: details or the id just arrived
+    if (!samePlace) panel.scrollTop = 0;
+    panel.dataset.shown = String(p.i);
+    if (!samePlace) $("#ex-close").focus();
+    else if (refocus) {
+      const same = refocus.startsWith("#") ? panel.querySelector(refocus)
+        : [...panel.querySelectorAll("a, button")].find((el) => el.textContent.trim() === refocus);
+      (same || $("#ex-close")).focus();
+    }
+    if (push && !noId) {
+      if (panel.dataset.pushed) saveHash();   // one Back step per panel, not per place looked at
+      else { listAtPush = listHash(); saveHash(true); panel.dataset.pushed = "1"; }
+    }
+    if (!loaded) loadDetail(p.co).then(() => { if (panel.dataset.i === String(p.i) && !panel.hidden) openPlace(p, false); });
+  }
+
+  // fromHistory: the Back button (or a hash link) already moved the URL, so don't touch history again
+  function closePlace(fromHistory = false) {
+    st.p = "";
+    const panel = $("#ex-panel");
+    const wasI = panel.dataset.i;   // the row the panel belonged to: focus goes back there
+    panel.hidden = true;
+    delete panel.dataset.id;
+    delete panel.dataset.i;
+    delete panel.dataset.shown;
+    delete panel.dataset.pushed;
+    document.body.classList.remove("ex-open");
+    panelMode();
+    if (!fromHistory) {
+      // the list hasn't changed since the panel opened: step back over the entry openPlace pushed, so Back isn't a dead click
+      if (history.state && history.state.areats === "place" && listHash() === listAtPush) history.back();
+      else saveHash();
+    }
+    listAtPush = null;
+    const row = wasI && document.querySelector(`.ex-row[data-i="${Number(wasI)}"]`);
+    if (row) row.focus();
+  }
+
+  // ---------------------------------------------------------------- map (canvas: county outlines + a dot per place)
+  let SHAPES = null, cam = null;
+  // Arkansas's own frame (set per state: a port's leftover numbers once framed the wrong state, QA 2026-11-03)
+  const LAT0 = 34.75, KX = Math.cos(LAT0 * Math.PI / 180);
+  const proj = (lo, la) => [(lo - (-92.4)) * KX, -(la - LAT0)];
+
+  function fitCam(w, h) {
+    const [x0, y0] = proj(-94.62, 36.50), [x1, y1] = proj(-89.64, 33.00);   // the state's west/north and east/south edges
+    const k = Math.min(w / (x1 - x0), h / (y1 - y0)) * 0.95;
+    return { k, x: (w - (x1 - x0) * k) / 2 - x0 * k, y: (h - (y1 - y0) * k) / 2 - y0 * k };
+  }
+
+  // calls f on every ring, however deeply it's nested (the state is [polygon[ring[point]]], each county [ring[point]])
+  const eachRing = (g, f) => {
+    if (!Array.isArray(g) || !g.length) return;
+    if (Array.isArray(g[0]) && typeof g[0][0] === "number") f(g); else g.forEach((x) => eachRing(x, f));
+  };
+
+  const classic = (p) => Boolean((p.hc && p.g) || p.mi);
+  async function drawMap() {
+    const cv = $("#ex-map"), wrap = $("#ex-mapwrap");
+    const w = wrap.clientWidth, h = wrap.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    if (!cam) cam = fitCam(w, h);
+    if (!SHAPES) SHAPES = await fetchJSON(`${BASE}/data/ar_shapes.json`).catch(() => ({ state: [], counties: [] }));
+    const c = cv.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+    const X = (lo, la) => { const [x, y] = proj(lo, la); return [x * cam.k + cam.x, y * cam.k + cam.y]; };
+    const ring = (r) => { r.forEach(([lo, la], i) => { const [x, y] = X(lo, la); i ? c.lineTo(x, y) : c.moveTo(x, y); }); c.closePath(); };
+    c.fillStyle = "#f3eee3";   // the map stays light in dark mode (its frame is light too), so the dots keep their contrast
+    c.beginPath(); eachRing(SHAPES.state, ring); c.fill("evenodd");
+    c.strokeStyle = "rgba(14,26,48,.22)"; c.lineWidth = 0.8;
+    for (const co of SHAPES.counties || []) { c.beginPath(); eachRing(co.c, ring); c.stroke(); }
+    const pts = current.filter((p) => p.la != null);
+    const r = Math.max(2.2, Math.min(5, 1.6 + cam.k / 120));
+    // plain places: one batch of small squares (tens of thousands draw fast that way); hand-checked and honored places: dots on top
+    c.fillStyle = "#2e5e3e";   // Ozark forest
+    const sq = pts.length > 3000 ? Math.max(1.6, r - 0.6) : r * 1.6;
+    for (const p of pts) {
+      if (classic(p)) continue;
+      const [x, y] = X(p.lo, p.la);
+      if (x < -5 || y < -5 || x > w + 5 || y > h + 5) continue;
+      if (pts.length > 3000) c.fillRect(x - sq / 2, y - sq / 2, sq, sq);
+      else { c.beginPath(); c.arc(x, y, r, 0, 6.2832); c.fill(); }
+    }
+    c.fillStyle = "#9d2235"; c.strokeStyle = "#ffffff"; c.lineWidth = 1;   // the guide picks in cardinal
+    for (const p of pts) {
+      if (!classic(p)) continue;
+      const [x, y] = X(p.lo, p.la);
+      if (x < -5 || y < -5 || x > w + 5 || y > h + 5) continue;
+      c.beginPath(); c.arc(x, y, r + 1, 0, 6.2832); c.fill(); c.stroke();
+    }
+    $("#ex-maphint").textContent = pts.length ? `${pts.length.toLocaleString()} ${pts.length === 1 ? "place" : "places"} · tap a dot` : "No places to show";
+  }
+
+  function nearestDot(px, py) {
+    let best = null, bd = 14 * 14;
+    for (const p of current) {
+      if (p.la == null) continue;
+      const [x0, y0] = proj(p.lo, p.la), x = x0 * cam.k + cam.x, y = y0 * cam.k + cam.y;
+      const d = (x - px) ** 2 + (y - py) ** 2;
+      if (d < bd || (d === bd && classic(p))) { bd = d; best = p; }
+    }
+    return best;
+  }
+
+  function zoomAt(f, px, py) {
+    const k = Math.min(Math.max(cam.k * f, 40), 60000);
+    const s = k / cam.k;
+    cam = { k, x: px - (px - cam.x) * s, y: py - (py - cam.y) * s };
+    drawMap();
+  }
+
+  function mapEvents() {
+    const cv = $("#ex-map");
+    const ptrs = new Map();
+    let moved = false, pinch0 = null;
+    cv.addEventListener("wheel", (e) => { e.preventDefault(); const b = cv.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.25 : 0.8, e.clientX - b.left, e.clientY - b.top); }, { passive: false });
+    cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); moved = false; pinch0 = null; });
+    cv.addEventListener("pointermove", (e) => {
+      if (!ptrs.has(e.pointerId)) return;
+      const prev = ptrs.get(e.pointerId);
+      ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+      if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        const r = cv.getBoundingClientRect();
+        if (pinch0) zoomAt(d / pinch0, (a[0] + b[0]) / 2 - r.left, (a[1] + b[1]) / 2 - r.top);
+        pinch0 = d; moved = true; return;
+      }
+      const dx = e.clientX - prev[0], dy = e.clientY - prev[1];
+      if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+      cam.x += dx; cam.y += dy; drawMap();
+    });
+    const up = (e) => {
+      ptrs.delete(e.pointerId);
+      if (!moved && ptrs.size === 0) {
+        const b = cv.getBoundingClientRect(), p = nearestDot(e.clientX - b.left, e.clientY - b.top);
+        if (p) openPlace(p);
+      }
+      if (ptrs.size < 2) pinch0 = null;
+    };
+    cv.addEventListener("pointerup", up);
+    cv.addEventListener("pointercancel", (e) => ptrs.delete(e.pointerId));
+    $("#ex-zin").onclick = () => zoomAt(1.6, cv.clientWidth / 2, cv.clientHeight / 2);
+    $("#ex-zout").onclick = () => zoomAt(0.625, cv.clientWidth / 2, cv.clientHeight / 2);
+    window.addEventListener("resize", () => { if (view === "map") drawMap(); });
+  }
+
+  function centerOn(pt) {
+    const cv = $("#ex-map"), w = cv.clientWidth, h = cv.clientHeight;
+    const k = 4000, [x, y] = proj(pt.lo, pt.la);
+    cam = { k, x: w / 2 - x * k, y: h / 2 - y * k };
+  }
+
+  // ---------------------------------------------------------------- data, URL state, controls
+  let SOURCES = [], DETAIL_FILES = [];
+  async function fetchJSON(url, opts) { const r = await fetch(url, opts); if (!r.ok) throw new Error(r.status + " " + url); return r.json(); }
+  // the build this page's data comes from: the page names it (so a cached core.json from an older build isn't used), core.json confirms it
+  const PAGE_VER = ($("#ex-app") && $("#ex-app").dataset.ver) || "";
+  let DV = "";
+  const vq = (v) => (v ? "?v=" + encodeURIComponent(v) : "");
+  // a data file from another build (a cache that outlived a deploy) is fetched once more, then refused: its rows wouldn't line up
+  async function fetchCurrent(url, verOf) {
+    let d = await fetchJSON(url + vq(DV));
+    if (DV && verOf(d) !== DV) d = await fetchJSON(url + vq(DV), { cache: "reload" });
+    if (DV && verOf(d) !== DV) throw new Error("another build: " + url);
+    return d;
+  }
+  const DETAIL = new Map(), DETAIL_LOADED = new Set(), DETAIL_FAILED = new Set(), detailPromises = new Map();
+  // a county's detail file (phones, websites, notes, alcohol licenses) is fetched only once someone reaches for a place there
+  function loadDetail(co) {
+    // a county with no extras has no file (null in dfiles): nothing to fetch
+    if (!Number.isInteger(co) || co < 0 || co >= DETAIL_FILES.length || !DETAIL_FILES[co]) { DETAIL_LOADED.add(co); return Promise.resolve(); }
+    if (!detailPromises.has(co)) {
+      detailPromises.set(co, fetchCurrent(`${BASE}/data/detail-${encodeURIComponent(DETAIL_FILES[co])}.json`, (d) => d && d._v).then((d) => {
+        if (d && typeof d === "object") for (const k of Object.keys(d)) { const i = Number(k); if (Number.isInteger(i) && d[k] && typeof d[k] === "object") DETAIL.set(i, d[k]); }
+      }).catch(() => { DETAIL_FAILED.add(co); /* offline or another build: the panel says so, and asks for a reload */ })
+        .finally(() => DETAIL_LOADED.add(co)));
+    }
+    return detailPromises.get(co);
+  }
+
+  // ids.json: one stable id per place, in core order (saved places, #p= links and the panel's history entry use them)
+  let idsPromise = null, idsReady = false, idsFailed = false;
+  function loadIds() {
+    idsPromise ||= fetchCurrent(`${BASE}/data/ids.json`, (d) => d && d.v).then((d) => {
+      const ids = d && typeof d.ids === "string" ? d.ids.split(",") : [];   // one comma-separated string: smaller than a JSON array
+      if (ids.length !== P.length) throw new Error("ids.json doesn't match core.json");
+      ids.forEach((x, i) => { P[i].id = x; });
+    }).catch(() => { idsFailed = true; /* offline or another build: saving and links wait for a reload, and the page says so */ })
+      .finally(() => { idsReady = true; });
+    return idsPromise;
+  }
+
+  async function load() {
+    let d = await fetchJSON(`${BASE}/data/core.json${vq(PAGE_VER)}`);
+    // a core.json with no version predates versioning (a cache that ignored ?v=): its rows would meet this build's ids and county
+    // files unchecked, so fetch it once more past the cache, then stop with the reload message rather than mix two builds
+    if (PAGE_VER && typeof d.ver !== "string") d = await fetchJSON(`${BASE}/data/core.json${vq(PAGE_VER)}`, { cache: "reload" });
+    if (PAGE_VER && typeof d.ver !== "string") throw new Error("core.json from before versioning");
+    DV = typeof d.ver === "string" ? d.ver : "";
+    GENERATED = d.generated; CAL = d.calibration || {}; SOURCES = d.srcs || []; DETAIL_FILES = d.dfiles || [];
+    META = { permits: d.permits_updated };
+    const n = d.n, towns = new Map(), C = { ...d.cols };
+    for (const [k, pairs] of Object.entries(d.sparse || {})) {   // mostly-empty columns arrive as [[index, value], ...]
+      const col = new Array(n).fill(null);
+      if (Array.isArray(pairs)) for (const pr of pairs) if (Array.isArray(pr) && Number.isInteger(pr[0]) && pr[0] >= 0 && pr[0] < n) col[pr[0]] = pr[1];
+      C[k] = col;
+    }
+    for (const k of ["n", "c", "co", "cu", "t", "s", "a", "z", "b", "ch", "g", "hc", "ip", "f", "h", "mi", "dish", "lq", "dla", "dlo", "jb", "sd"])
+      if (!Array.isArray(C[k]) || C[k].length !== n) C[k] = new Array(n).fill(null);
+    P = new Array(n);
+    let la = 0, lo = 0;   // coordinates come as steps of 0.0001° from the previous place
+    for (let i = 0; i < n; i++) {
+      let pla = null, plo = null;
+      if (C.dla[i] != null && C.dlo[i] != null) { la += C.dla[i]; lo += C.dlo[i]; pla = la / 10000; plo = lo / 10000; }
+      const city = C.c[i] == null ? null : d.cities[C.c[i]], cu = d.cuisines[C.cu[i]], brand = C.b[i] == null ? null : d.brands[C.b[i]];
+      const county = C.co[i] == null ? null : d.counties[C.co[i]];
+      const p = { i, id: null, n: String(C.n[i] ?? ""), c: city, cu, t: C.t[i], s: C.s[i], a: C.a[i], z: C.z[i], la: pla, lo: plo,
+        ch: num(C.ch[i]) || 1, g: C.g[i] || 0, hc: C.hc[i] === 1, ip: C.ip[i], f: num(C.f[i]), h: C.h[i] || 0,
+        mi: num(C.mi[i]) || 0, jb: C.jb[i] === 1, dish: C.dish[i], co: C.co[i], county, lq: C.lq[i] === 1, sd: num(C.sd[i]) };
+      p.search = " " + normalize([p.n, city, county, p.z, cu, brand, p.dish].filter(Boolean).join(" ")) + " " + normAddr(p.a || "") + " ";
+      p.nameText = " " + normalize([p.n, brand].filter(Boolean).join(" ")) + " ";
+      p.key = normalize(p.n);
+      P[i] = p;
+      if (city) towns.set(city, (towns.get(city) || 0) + 1);
+    }
+    const byCount = [...towns.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [name] of byCount) { const k = normAddr(name); if (!own(TOWN_KEYS, k)) TOWN_KEYS[k] = name; }   // biggest town wins a shared spelling
+    TOWN_KEYS_BY_LENGTH = Object.keys(TOWN_KEYS).sort((a, b) => b.length - a.length);
+    $("#ex-town").innerHTML = '<option value="">All towns</option>' + [...towns.keys()].sort((a, b) => a.localeCompare(b)).map((t) => `<option>${esc(t)}</option>`).join("");
+    const cuis = new Map();
+    for (const p of P) cuis.set(p.cu, (cuis.get(p.cu) || 0) + 1);
+    $("#ex-cuisine").innerHTML = '<option value="">All kinds</option>' + [...cuis.entries()].sort((a, b) => b[1] - a[1]).map(([c, k]) => `<option value="${esc(c)}">${esc(c)} (${esc(k.toLocaleString())})</option>`).join("");
+    bibCount = P.filter((p) => !p.v && p.mi === 2).length;
+    $("#ex-bibwrap").hidden = !bibCount;
+    $("#ex-bibn").textContent = `(${bibCount.toLocaleString()})`;
+    if (!bibCount) st.bib = false;
+  }
+
+  const guideOk = (g) => own(GUIDES, g);
+  function readHash() {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const last = store.get("guide", "cheesedip");
+    // a returning visitor gets the guide they used last, unless it's an empty Saved list
+    st.g = guideOk(h.get("g")) ? h.get("g") : guideOk(last) && !(last === "saved" && !saved.size) ? last : "cheesedip";
+    st.q = h.get("q") || ""; st.town = h.get("town") || ""; st.cuisine = h.get("kind") || ""; st.chains = h.get("chains") === "1"; st.bib = h.get("bib") === "1";
+    st.sort = h.get("sort") || ""; st.p = h.get("p") || "";
+  }
+  function hashOf(withPlace) {
+    const h = new URLSearchParams();
+    h.set("g", st.g);
+    if (st.q) h.set("q", st.q); if (st.town) h.set("town", st.town); if (st.cuisine) h.set("kind", st.cuisine);
+    if (st.chains) h.set("chains", "1"); if (st.bib) h.set("bib", "1"); if (st.sort) h.set("sort", st.sort); if (withPlace && st.p) h.set("p", st.p);
+    return "#" + h.toString();
+  }
+  const listHash = () => hashOf(false);
+  // filter changes replace the current history entry; opening a place pushes one, so Back closes the panel
+  function saveHash(push = false) {
+    const url = hashOf(true);
+    if (push) history.pushState({ areats: "place" }, "", url);
+    else history.replaceState(st.p ? { areats: "place" } : null, "", url);
+    store.set("guide", st.g);
+  }
+
+  // a coarse Arkansas outline (ArkansasEats/Services/LocationService.swift's ArkansasOutline): a bounding box would count the neighbours' border towns
+  const AR_RINGS = [[[-94.043,33.019],[-94.043,33.552],[-94.063,33.567],[-94.066,33.581],[-94.075,33.582],[-94.094,33.571],[-94.127,33.572],[-94.144,33.559],[-94.155,33.558],[-94.158,33.563],[-94.152,33.583],[-94.159,33.592],[-94.178,33.588],[-94.181,33.583],[-94.211,33.586],[-94.216,33.584],[-94.212,33.569],[-94.215,33.561],[-94.226,33.554],[-94.237,33.553],[-94.251,33.557],[-94.254,33.562],[-94.234,33.578],[-94.236,33.59],[-94.243,33.591],[-94.262,33.581],[-94.271,33.56],[-94.278,33.556],[-94.289,33.555],[-94.292,33.561],[-94.273,33.573],[-94.271,33.578],[-94.297,33.581],[-94.304,33.579],[-94.303,33.559],[-94.311,33.55],[-94.322,33.548],[-94.33,33.552],[-94.331,33.572],[-94.336,33.574],[-94.352,33.565],[-94.36,33.552],[-94.383,33.547],[-94.395,33.55],[-94.399,33.554],[-94.383,33.564],[-94.377,33.574],[-94.369,33.578],[-94.366,33.582],[-94.368,33.585],[-94.384,33.587],[-94.387,33.585],[-94.387,33.576],[-94.393,33.57],[-94.408,33.569],[-94.421,33.578],[-94.423,33.593],[-94.443,33.592],[-94.449,33.603],[-94.453,33.629],[-94.457,33.637],[-94.475,33.64],[-94.486,33.638],[-94.457,34.638],[-94.432,35.369],[-94.435,35.389],[-94.431,35.394],[-94.58,36.262],[-94.618,36.499],[-90.152,36.498],[-90.155,36.497],[-90.154,36.492],[-90.16,36.494],[-90.156,36.488],[-90.16,36.487],[-90.157,36.484],[-90.16,36.48],[-90.144,36.476],[-90.142,36.471],[-90.153,36.471],[-90.155,36.464],[-90.15,36.465],[-90.145,36.463],[-90.144,36.468],[-90.141,36.467],[-90.141,36.458],[-90.134,36.454],[-90.137,36.45],[-90.134,36.436],[-90.139,36.435],[-90.138,36.431],[-90.143,36.431],[-90.144,36.426],[-90.139,36.421],[-90.134,36.423],[-90.139,36.414],[-90.128,36.417],[-90.129,36.411],[-90.119,36.413],[-90.119,36.409],[-90.114,36.409],[-90.116,36.406],[-90.111,36.408],[-90.11,36.404],[-90.104,36.406],[-90.101,36.402],[-90.098,36.404],[-90.081,36.401],[-90.066,36.388],[-90.068,36.385],[-90.063,36.384],[-90.067,36.378],[-90.063,36.377],[-90.063,36.367],[-90.068,36.356],[-90.078,36.349],[-90.074,36.343],[-90.077,36.341],[-90.078,36.336],[-90.075,36.334],[-90.082,36.322],[-90.07,36.313],[-90.064,36.302],[-90.071,36.294],[-90.079,36.29],[-90.076,36.281],[-90.084,36.272],[-90.096,36.271],[-90.117,36.264],[-90.118,36.253],[-90.124,36.243],[-90.131,36.241],[-90.125,36.235],[-90.126,36.229],[-90.133,36.226],[-90.142,36.228],[-90.146,36.221],[-90.149,36.222],[-90.156,36.214],[-90.17,36.214],[-90.178,36.208],[-90.188,36.206],[-90.197,36.196],[-90.2,36.196],[-90.204,36.187],[-90.211,36.183],[-90.221,36.184],[-90.23,36.173],[-90.231,36.164],[-90.235,36.159],[-90.231,36.154],[-90.236,36.139],[-90.246,36.136],[-90.249,36.13],[-90.261,36.128],[-90.272,36.116],[-90.293,36.114],[-90.3,36.098],[-90.32,36.089],[-90.318,36.077],[-90.32,36.071],[-90.333,36.068],[-90.337,36.047],[-90.348,36.042],[-90.348,36.035],[-90.354,36.03],[-90.352,36.025],[-90.369,36.009],[-90.378,35.996],[-89.733,36.001],[-89.719,35.986],[-89.72,35.971],[-89.715,35.963],[-89.656,35.926],[-89.644,35.909],[-89.645,35.891],[-89.648,35.894],[-89.666,35.883],[-89.675,35.884],[-89.688,35.897],[-89.715,35.906],[-89.743,35.907],[-89.766,35.891],[-89.773,35.876],[-89.772,35.865],[-89.764,35.858],[-89.706,35.837],[-89.701,35.828],[-89.706,35.818],[-89.735,35.806],[-89.765,35.811],[-89.781,35.805],[-89.799,35.789],[-89.797,35.783],[-89.799,35.775],[-89.821,35.757],[-89.847,35.755],[-89.876,35.738],[-89.888,35.75],[-89.91,35.759],[-89.924,35.749],[-89.956,35.733],[-89.959,35.724],[-89.956,35.691],[-89.932,35.661],[-89.899,35.651],[-89.887,35.654],[-89.878,35.666],[-89.865,35.67],[-89.858,35.668],[-89.851,35.657],[-89.852,35.643],[-89.857,35.634],[-89.878,35.626],[-89.894,35.616],[-89.911,35.618],[-89.947,35.601],[-89.957,35.589],[-89.954,35.577],[-89.942,35.557],[-89.911,35.548],[-89.913,35.536],[-89.905,35.537],[-89.902,35.528],[-89.909,35.514],[-89.927,35.512],[-89.959,35.524],[-89.957,35.539],[-89.989,35.56],[-90.008,35.56],[-90.033,35.553],[-90.04,35.548],[-90.05,35.513],[-90.043,35.492],[-90.019,35.466],[-90.032,35.428],[-90.043,35.421],[-90.047,35.413],[-90.057,35.404],[-90.042,35.397],[-90.045,35.393],[-90.054,35.389],[-90.07,35.408],[-90.062,35.415],[-90.071,35.423],[-90.074,35.434],[-90.067,35.465],[-90.085,35.479],[-90.108,35.477],[-90.114,35.472],[-90.121,35.466],[-90.129,35.442],[-90.169,35.422],[-90.179,35.385],[-90.166,35.375],[-90.136,35.377],[-90.143,35.388],[-90.146,35.399],[-90.142,35.409],[-90.13,35.414],[-90.113,35.41],[-90.105,35.401],[-90.081,35.386],[-90.093,35.361],[-90.11,35.343],[-90.104,35.332],[-90.109,35.305],[-90.124,35.305],[-90.139,35.299],[-90.149,35.303],[-90.159,35.301],[-90.164,35.296],[-90.169,35.28],[-90.152,35.256],[-90.14,35.252],[-90.116,35.256],[-90.105,35.254],[-90.079,35.229],[-90.074,35.218],[-90.074,35.211],[-90.08,35.208],[-90.089,35.212],[-90.096,35.195],[-90.116,35.199],[-90.117,35.188],[-90.092,35.156],[-90.067,35.152],[-90.065,35.139],[-90.083,35.122],[-90.097,35.117],[-90.109,35.119],[-90.143,35.135],[-90.165,35.125],[-90.177,35.112],[-90.181,35.091],[-90.196,35.06],[-90.196,35.038],[-90.209,35.027],[-90.256,35.035],[-90.265,35.04],[-90.296,35.04],[-90.31,35.01],[-90.309,34.996],[-90.296,34.976],[-90.25,34.951],[-90.244,34.938],[-90.245,34.921],[-90.25,34.907],[-90.318,34.871],[-90.315,34.864],[-90.303,34.859],[-90.307,34.846],[-90.311,34.844],[-90.323,34.846],[-90.34,34.86],[-90.352,34.853],[-90.38,34.846],[-90.415,34.832],[-90.424,34.835],[-90.429,34.841],[-90.432,34.855],[-90.429,34.867],[-90.438,34.885],[-90.46,34.892],[-90.48,34.883],[-90.485,34.875],[-90.484,34.861],[-90.457,34.823],[-90.459,34.814],[-90.471,34.805],[-90.475,34.793],[-90.47,34.781],[-90.453,34.753],[-90.452,34.74],[-90.458,34.733],[-90.47,34.727],[-90.489,34.724],[-90.502,34.724],[-90.518,34.733],[-90.522,34.744],[-90.521,34.753],[-90.501,34.771],[-90.515,34.802],[-90.523,34.802],[-90.537,34.799],[-90.544,34.791],[-90.548,34.782],[-90.543,34.764],[-90.544,34.749],[-90.55,34.743],[-90.564,34.739],[-90.568,34.725],[-90.546,34.702],[-90.539,34.699],[-90.522,34.697],[-90.48,34.701],[-90.471,34.699],[-90.463,34.688],[-90.466,34.674],[-90.508,34.637],[-90.517,34.631],[-90.532,34.627],[-90.548,34.632],[-90.554,34.641],[-90.553,34.66],[-90.538,34.673],[-90.54,34.685],[-90.55,34.695],[-90.556,34.698],[-90.567,34.693],[-90.588,34.671],[-90.583,34.643],[-90.588,34.627],[-90.587,34.616],[-90.57,34.587],[-90.546,34.563],[-90.541,34.548],[-90.546,34.538],[-90.568,34.526],[-90.578,34.516],[-90.589,34.491],[-90.585,34.461],[-90.574,34.452],[-90.567,34.44],[-90.567,34.429],[-90.571,34.42],[-90.581,34.411],[-90.614,34.391],[-90.635,34.386],[-90.659,34.376],[-90.655,34.372],[-90.667,34.356],[-90.667,34.349],[-90.657,34.322],[-90.661,34.315],[-90.669,34.313],[-90.686,34.316],[-90.693,34.323],[-90.692,34.339],[-90.682,34.353],[-90.681,34.362],[-90.683,34.369],[-90.712,34.364],[-90.75,34.368],[-90.766,34.362],[-90.768,34.347],[-90.745,34.325],[-90.741,34.313],[-90.743,34.302],[-90.753,34.289],[-90.765,34.28],[-90.803,34.282],[-90.828,34.274],[-90.837,34.25],[-90.84,34.223],[-90.848,34.206],[-90.857,34.212],[-90.879,34.215],[-90.895,34.224],[-90.907,34.244],[-90.923,34.246],[-90.929,34.245],[-90.937,34.234],[-90.935,34.219],[-90.916,34.197],[-90.888,34.182],[-90.877,34.186],[-90.87,34.183],[-90.856,34.187],[-90.817,34.183],[-90.809,34.176],[-90.808,34.161],[-90.811,34.156],[-90.826,34.142],[-90.847,34.137],[-90.865,34.141],[-90.894,34.161],[-90.91,34.165],[-90.954,34.138],[-90.959,34.13],[-90.958,34.125],[-90.946,34.109],[-90.918,34.093],[-90.894,34.098],[-90.883,34.097],[-90.877,34.093],[-90.871,34.08],[-90.888,34.055],[-90.887,34.035],[-90.892,34.027],[-90.945,34.018],[-90.973,34.022],[-90.988,34.019],[-90.98,33.998],[-90.971,33.992],[-90.961,33.978],[-90.968,33.963],[-90.983,33.96],[-91.0,33.966],[-91.019,34.003],[-91.037,33.994],[-91.047,33.992],[-91.048,33.985],[-91.075,33.984],[-91.088,33.975],[-91.09,33.966],[-91.084,33.956],[-91.036,33.944],[-91.01,33.929],[-91.026,33.908],[-91.071,33.867],[-91.073,33.857],[-91.068,33.84],[-91.047,33.815],[-91.0,33.8],[-90.992,33.793],[-90.988,33.784],[-90.991,33.777],[-91.0,33.769],[-91.023,33.763],[-91.054,33.779],[-91.086,33.776],[-91.107,33.771],[-91.123,33.782],[-91.132,33.783],[-91.14,33.777],[-91.145,33.767],[-91.141,33.76],[-91.145,33.752],[-91.147,33.732],[-91.145,33.727],[-91.132,33.714],[-91.118,33.705],[-91.101,33.705],[-91.068,33.716],[-91.06,33.715],[-91.047,33.706],[-91.036,33.689],[-91.03,33.688],[-91.031,33.678],[-91.037,33.671],[-91.046,33.668],[-91.059,33.666],[-91.079,33.658],[-91.094,33.658],[-91.13,33.674],[-91.161,33.707],[-91.212,33.698],[-91.225,33.688],[-91.229,33.678],[-91.228,33.671],[-91.219,33.661],[-91.178,33.651],[-91.139,33.626],[-91.13,33.606],[-91.134,33.594],[-91.152,33.583],[-91.178,33.583],[-91.198,33.572],[-91.224,33.567],[-91.231,33.561],[-91.232,33.553],[-91.226,33.541],[-91.219,33.532],[-91.187,33.511],[-91.185,33.501],[-91.186,33.496],[-91.196,33.488],[-91.209,33.469],[-91.232,33.457],[-91.235,33.439],[-91.207,33.434],[-91.177,33.444],[-91.169,33.453],[-91.176,33.472],[-91.171,33.492],[-91.157,33.493],[-91.137,33.481],[-91.125,33.473],[-91.118,33.454],[-91.121,33.444],[-91.132,33.43],[-91.176,33.417],[-91.184,33.42],[-91.199,33.418],[-91.209,33.409],[-91.208,33.402],[-91.191,33.39],[-91.172,33.381],[-91.143,33.382],[-91.102,33.41],[-91.097,33.438],[-91.086,33.452],[-91.078,33.456],[-91.068,33.455],[-91.058,33.445],[-91.058,33.429],[-91.075,33.406],[-91.12,33.364],[-91.142,33.349],[-91.142,33.3],[-91.126,33.28],[-91.128,33.268],[-91.118,33.262],[-91.106,33.242],[-91.099,33.238],[-91.086,33.274],[-91.079,33.283],[-91.067,33.287],[-91.052,33.285],[-91.044,33.275],[-91.05,33.251],[-91.066,33.233],[-91.069,33.233],[-91.071,33.227],[-91.078,33.227],[-91.083,33.222],[-91.092,33.221],[-91.084,33.181],[-91.088,33.142],[-91.103,33.132],[-91.128,33.129],[-91.15,33.131],[-91.164,33.142],[-91.184,33.142],[-91.192,33.137],[-91.202,33.124],[-91.199,33.106],[-91.181,33.099],[-91.173,33.089],[-91.15,33.082],[-91.125,33.065],[-91.12,33.057],[-91.128,33.035],[-91.161,33.021],[-91.166,33.011],[-91.166,33.004],[-92.104,33.008],[-92.989,33.018],[-94.043,33.019]]];
+  function inRing(ring, la, lo) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      if ((yi > la) !== (yj > la) && lo < (xj - xi) * (la - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  const inArkansas = (la, lo) => AR_RINGS.some((r) => inRing(r, la, lo));
+
+  function locate() {
+    if (!navigator.geolocation) { $("#ex-locmsg").textContent = "This browser can't share its location."; return; }
+    $("#ex-locmsg").textContent = "Finding you…";
+    navigator.geolocation.getCurrentPosition((pos) => {
+      here = { la: pos.coords.latitude, lo: pos.coords.longitude };
+      const inGA = inArkansas(here.la, here.lo);
+      $("#ex-locmsg").textContent = inGA ? "Sorted by distance from you. Your location stays in this browser." : "You're outside Arkansas: distances are from where you are. Your location stays in this browser.";
+      st.sort = GUIDES[st.g].sorts.includes("nearest") ? "nearest" : st.sort;
+      if (view === "map" && inGA) centerOn(here);
+      shown = 100; render();
+    }, (err) => {
+      $("#ex-locmsg").textContent = err && err.code === 1 ? "Location is off for this site. Allow it in your browser settings to sort by distance."
+        : "Couldn't get a location fix just now. Tap Near me to try again.";
+    },
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 });   // a fresh fix on every tap, never one from minutes ago
+  }
+
+  function setView(v) {
+    view = v;
+    document.querySelectorAll(".ex-view button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    $("#ex-listwrap").hidden = v !== "list";
+    $("#ex-mapwrap").hidden = v !== "map";
+    render();
+    // the map often starts below the fold (on phones, and on laptop-height screens): bring it into view
+    if (v === "map" && $("#ex-mapwrap").getBoundingClientRect().top > innerHeight * 0.5) $("#ex-mapwrap").scrollIntoView({ block: "nearest" });
+  }
+
+  // the URL moved under us: Back/Forward (popstate) or a link to another #hash (hashchange). Both can fire for one step.
+  function fromURL() {
+    const before = listHash();
+    readHash();
+    if (listHash() !== before) { syncInputs(); shown = 100; render(); }
+    if (st.p && !idsReady) { loadIds().then(fromURL); return; }
+    const p = st.p && P.find((x) => x.id === st.p);
+    const panel = $("#ex-panel");
+    if (p) {
+      if (panel.hidden || panel.dataset.id !== p.id) {
+        openPlace(p, false);
+        // Forward to a place opened earlier: its entry was pushed after the list's, so closing it steps back, as after a tap
+        if (history.state && history.state.areats === "place") { listAtPush = listHash(); panel.dataset.pushed = "1"; }
+      }
+    }
+    else { if (!panel.hidden) closePlace(true); linkMissing(); }
+  }
+
+  // a #p= link whose place isn't here: ids.json didn't load, or the place has left the list since the link was made
+  function linkMissing() {
+    if (!st.p) return;
+    $("#ex-locmsg").textContent = idsFailed ? "The place in this link couldn't load: you may be offline, or the site was just updated. Reload the page to try again."
+      : "The place in this link isn't on the list anymore (it may have closed or moved).";
+  }
+
+  function controls() {
+    document.querySelectorAll(".ex-guides button").forEach((b) => b.onclick = () => { if (guideOk(b.dataset.g)) st.g = b.dataset.g; st.sort = ""; shown = 100; render(); });
+    let t = null;
+    $("#ex-q").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { st.q = e.target.value; shown = 100; render(); }, 120); });
+    $("#ex-sort").onchange = (e) => { st.sort = e.target.value; if (st.sort === "nearest" && !here) locate(); shown = 100; render(); };
+    $("#ex-town").onchange = (e) => { st.town = e.target.value; shown = 100; render(); };
+    $("#ex-cuisine").onchange = (e) => { st.cuisine = e.target.value; shown = 100; render(); };
+    $("#ex-chains").onchange = (e) => { st.chains = e.target.checked; shown = 100; render(); };
+    $("#ex-bib").onchange = (e) => { st.bib = e.target.checked; shown = 100; render(); };
+    $("#ex-clear").onclick = () => { st.town = st.cuisine = ""; st.chains = st.bib = false; syncInputs(); shown = 100; render(); };
+    $("#ex-locate").onclick = locate;
+    $("#ex-more").onclick = () => { shown += 200; renderList(order()); };
+    document.querySelectorAll(".ex-view button").forEach((b) => b.onclick = () => setView(b.dataset.v));
+    $("#ex-list").addEventListener("click", (e) => { const b = e.target.closest(".ex-row"); if (b && P[+b.dataset.i]) openPlace(P[+b.dataset.i]); });
+    // warm the region file of the row under the pointer (or keyboard focus), so the panel opens with its details
+    for (const ev of ["pointerover", "focusin"]) $("#ex-list").addEventListener(ev, (e) => { const b = e.target.closest && e.target.closest(".ex-row"); if (b && P[+b.dataset.i]) { loadIds(); loadDetail(P[+b.dataset.i].co); } });
+    // the ids (a few hundred KB) wait for the first sign of use, so a visit that only looks doesn't download them
+    const WARM = ["pointerdown", "keydown", "wheel", "scroll", "touchstart"];
+    const warmIds = () => { WARM.forEach((ev) => removeEventListener(ev, warmIds, true)); loadIds(); };
+    WARM.forEach((ev) => addEventListener(ev, warmIds, { capture: true, passive: true }));
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#ex-panel").hidden) closePlace(); });
+    window.addEventListener("popstate", fromURL);
+    window.addEventListener("hashchange", fromURL);
+    $("#ex-backdrop").addEventListener("click", () => { if (st.p || !$("#ex-panel").hidden) closePlace(); });
+    mapEvents();
+  }
+  function syncInputs() {
+    $("#ex-q").value = st.q; $("#ex-town").value = st.town; $("#ex-cuisine").value = st.cuisine; $("#ex-chains").checked = st.chains; $("#ex-bib").checked = st.bib;
+  }
+
+  (async () => {
+    $("#ex-loading").hidden = false;   // hidden in the HTML, so a browser without JavaScript shows only the <noscript> note
+    readHash();
+    try { await load(); } catch (e) { $("#ex-loading").textContent = "The restaurant list couldn't load. Refresh to try again."; return; }
+    syncInputs(); controls();
+    $("#ex-app").hidden = false;
+    $("#ex-loading").hidden = true;
+    render();
+    if (st.p) {
+      await loadIds();
+      const open = P.find((p) => p.id === st.p);
+      if (open) { await loadDetail(open.co); openPlace(open, false); }
+      else linkMissing();
+    }
+  })();
+})();

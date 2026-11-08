@@ -1,0 +1,21 @@
+{
+  "name": "Arkansas Eats",
+  "short_name": "AR Eats",
+  "description": "Cheese dip, barbecue & catfish: a guide to 7,279 Arkansas restaurants.",
+  "start_url": "/arkansas-eats/",
+  "display": "browser",
+  "background_color": "#f6f1e6",
+  "theme_color": "#2e5e3e",
+  "icons": [
+    {
+      "src": "/arkansas-eats/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/arkansas-eats/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

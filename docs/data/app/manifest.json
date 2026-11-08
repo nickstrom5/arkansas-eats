@@ -1,0 +1,27 @@
+{
+ "schema": 1,
+ "version": "2026-11-07.1",
+ "records_through": "2026-11-07",
+ "published": "2026-11-07T14:41:23Z",
+ "min_app_build": 1,
+ "files": {
+  "detail-arkansas": {
+   "path": "detail-arkansas-f1e554d5faf4.json",
+   "sha256": "f1e554d5faf40e90848e93c74459a9f0d15997271f1ea7ccf773c0003d273238",
+   "bytes": 1961183,
+   "rows": 7544
+  },
+  "places": {
+   "path": "places-0059246ecee2.json",
+   "sha256": "0059246ecee283cc4ea5ae56cbbd1f938c7c9c49f782b467e55bc3f09b901c02",
+   "bytes": 1359379,
+   "rows": 7602
+  }
+ },
+ "counts": {
+  "places": 7602,
+  "files": 2,
+  "bytes": 3320562,
+  "restaurants": 7279
+ }
+}
